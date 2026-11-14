@@ -8,13 +8,20 @@
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 
 use coqui_builder::{Describe, Partial};
 use coqui_transport::{Channel, Connector as _, Failure};
+use coqui_transport_web::Cancel;
 use coqui_transport_web::websocket::{
-    Connector, Dialer, DialerSettings, Listener, ListenerSettings, ServerTls,
+    Connector, Dialer, DialerSettings, Listener, ListenerSettings, Pending, ServerTls,
 };
 use url::Url;
 
@@ -32,7 +39,14 @@ pub struct WebSocketSettings {
     /// Listening: the wire, the limits, the origins it admits and whether plain WebSocket may leave loopback.
     #[map(default = ListenerSettings::default())]
     pub listen: ListenerSettings,
+    /// How many WebSocket upgrades a listener runs at once, each on a thread of its own. A connection that arrives past it is
+    /// closed unanswered, so a peer that says nothing holds one place, for at most `listen.limits.handshake`, and nothing else.
+    #[map(default = DEFAULT_MAX_HANDSHAKES)]
+    pub max_handshakes: usize,
 }
+
+/// What [`WebSocketSettings::max_handshakes`] is unless a host says otherwise.
+pub const DEFAULT_MAX_HANDSHAKES: usize = 64;
 
 /// The WebSocket transport as a [`Driver`].
 #[derive(Debug, Clone, Copy)]
@@ -96,12 +110,94 @@ impl Driver for WebSocketDriver {
                 coqui_builder::builder::BuildError::Failed(failure) => DriverError::from(failure),
                 other => DriverError::new(Refusal::Failed, other.to_string()),
             })?;
-        Ok(Box::new(Accepting { listener }))
+        Ok(Box::new(Accepting::new(listener, settings.max_handshakes)))
     }
 }
 
+/// The listener, and the upgrades in progress: each runs on a thread of its own, so a peer that is slow or silent delays nobody,
+/// and the thread that accepts is only ever waiting for a connection or taking a finished one.
 struct Accepting {
     listener: Listener,
+    finished: Receiver<Accepted>,
+    results: Sender<Accepted>,
+    running: Arc<Running>,
+    max: usize,
+}
+
+/// The upgrades under way: how many, and how to abandon each.
+#[derive(Default)]
+struct Running {
+    count: AtomicUsize,
+    next: AtomicUsize,
+    cancels: Mutex<Vec<(usize, Cancel)>>,
+}
+
+impl Accepting {
+    fn new(listener: Listener, max: usize) -> Self {
+        let (results, finished) = mpsc::channel();
+        Self {
+            listener,
+            finished,
+            results,
+            running: Arc::new(Running::default()),
+            max: max.max(1),
+        }
+    }
+
+    /// Starts `pending`'s upgrade on its own thread, or closes the connection when too many are under way.
+    fn upgrade(&self, pending: Pending) {
+        if self.running.count.fetch_add(1, Ordering::SeqCst) >= self.max {
+            self.running.count.fetch_sub(1, Ordering::SeqCst);
+            return;
+        }
+        let id = self.running.next.fetch_add(1, Ordering::SeqCst);
+        let peer = pending.peer_addr().to_string();
+        self.running
+            .cancels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((id, pending.canceller()));
+        let results = self.results.clone();
+        let running = Arc::clone(&self.running);
+        let started = crate::threads::spawn("coqui-transport-guatiao-handshake", move || {
+            // One peer's failed handshake is that peer's, not the listener's.
+            if let Ok(channel) = pending.handshake() {
+                let accepted: Accepted = (Box::new(channel), peer);
+                let _ = results.send(accepted);
+            }
+            running
+                .cancels
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|(other, _)| *other != id);
+            running.count.fetch_sub(1, Ordering::SeqCst);
+        });
+        if started.is_err() {
+            self.running
+                .cancels
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|(other, _)| *other != id);
+            self.running.count.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for Accepting {
+    /// Abandons every upgrade under way, so a stop does not wait for a silent peer.
+    fn drop(&mut self) {
+        let cancels: Vec<Cancel> = self
+            .running
+            .cancels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(_, cancel)| cancel.clone())
+            .collect();
+        for cancel in cancels {
+            cancel.cancel();
+        }
+    }
 }
 
 impl Acceptor for Accepting {
@@ -113,19 +209,26 @@ impl Acceptor for Accepting {
     }
 
     fn accept(&self, timeout: Duration) -> Result<Option<Accepted>, DriverError> {
-        let pending = match self.listener.next(Some(timeout)) {
-            Ok(pending) => pending,
-            Err(Failure::Timeout) => return Ok(None),
-            Err(failure) => return Err(failure.into()),
-        };
-        let peer = pending.peer_addr().to_string();
-        // One peer's failed handshake is that peer's, not the listener's.
-        match pending.handshake() {
-            Ok(channel) => Ok(Some((Box::new(channel), peer))),
-            Err(_) => Ok(None),
+        let until = Instant::now() + timeout;
+        loop {
+            if let Ok(done) = self.finished.try_recv() {
+                return Ok(Some(done));
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            match self.listener.next(Some(left.min(SLICE))) {
+                Ok(pending) => self.upgrade(pending),
+                Err(Failure::Timeout) => {}
+                Err(failure) => return Err(failure.into()),
+            }
         }
     }
 }
+
+/// How long the accepting thread waits for a connection before it looks for a finished upgrade.
+const SLICE: Duration = Duration::from_millis(10);
 
 crate::transport_provider! {
     /// `coqui-transport-web`'s WebSocket as a provider of the `transport` kind, id `websocket`.

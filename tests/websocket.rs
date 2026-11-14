@@ -101,3 +101,86 @@ fn tls_and_beyond_loopback_are_refused_unless_said() {
         .expect_err("plain beyond loopback");
     assert_eq!(error.status, Status::GUATIAO_ERR_GONE);
 }
+
+/// A peer that connects and says nothing holds only its own handshake, which is neither a second peer's wait nor the
+/// listener's stop.
+#[test]
+fn an_idle_connection_delays_neither_a_second_peer_nor_a_stop() {
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+
+    use coqui_transport_guatiao::contract::Told;
+
+    let registry = registry();
+    let transport = websocket(&registry, Map::new());
+    let (listener, told) = contract::listen(&transport, "ws://127.0.0.1:0/").expect("listens");
+    let address = listener.address().expect("answers");
+    let port = address
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.trim_end_matches('/').parse::<u16>().ok())
+        .expect("a port");
+    let idle = TcpStream::connect(("127.0.0.1", port)).expect("an idle connection");
+    let started = Instant::now();
+    let (_client, _heard) = contract::dial(&transport, DialRequest::new(address)).expect("dials");
+    let peer = contract::next_peer(&told);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "a second peer waited {:?} behind an idle one",
+        started.elapsed()
+    );
+    assert!(peer.address.starts_with("127.0.0.1:"));
+    let stopping = Instant::now();
+    listener.close(0, "");
+    loop {
+        match told.recv_timeout(Duration::from_secs(8)) {
+            Ok(Told::Closed(0, _)) => break,
+            Ok(_) => {}
+            Err(_) => panic!("listening did not end while a handshake was pending"),
+        }
+    }
+    assert!(
+        stopping.elapsed() < Duration::from_secs(3),
+        "a stop took {:?} with a handshake pending",
+        stopping.elapsed()
+    );
+    drop(idle);
+}
+
+/// Past the cap on handshakes at once a connection is closed unanswered.
+#[test]
+fn connections_past_the_handshake_cap_are_dropped() {
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let registry = registry();
+    let mut map = Map::new();
+    map.set("max_handshakes", 2_u64);
+    let transport = websocket(&registry, map);
+    let (listener, told) = contract::listen(&transport, "ws://127.0.0.1:0/").expect("listens");
+    let address = listener.address().expect("answers");
+    let port = address
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.trim_end_matches('/').parse::<u16>().ok())
+        .expect("a port");
+    let idle: Vec<TcpStream> = (0..2)
+        .map(|_| TcpStream::connect(("127.0.0.1", port)).expect("connects"))
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+    // A third is dropped: nobody writes to it, so its read ends.
+    let mut third = TcpStream::connect(("127.0.0.1", port)).expect("connects");
+    third
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("a timeout");
+    let mut byte = [0_u8; 1];
+    let read = std::io::Read::read(&mut third, &mut byte);
+    assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+    assert!(
+        !matches!(&read, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut),
+        "the third connection was held: {read:?}"
+    );
+    drop(idle);
+    listener.close(0, "");
+    drop(told);
+}

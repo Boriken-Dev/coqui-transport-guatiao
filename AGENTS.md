@@ -202,7 +202,7 @@ A peer's address is empty. The pipe crate's own access control (current user onl
 ## WebSocket (`coqui_transport_guatiao::websocket`, feature `websocket`)
 
 ```rust
-pub struct WebSocketSettings { pub dial: DialerSettings, pub listen: ListenerSettings }   // Describe, Default
+pub struct WebSocketSettings { pub dial: DialerSettings, pub listen: ListenerSettings, pub max_handshakes: usize }   // Describe, Default; max_handshakes defaults to DEFAULT_MAX_HANDSHAKES (64)
 pub struct WebSocketDriver;                  // Driver
 pub struct WebSocketProvider;                // transport_provider!, id "websocket"
 pub fn register(registry: &mut Registry) -> Result<(), LoadError>;   // library `coqui-transport-websocket`; a second call is skipped
@@ -211,7 +211,7 @@ pub fn register(registry: &mut Registry) -> Result<(), LoadError>;   // library 
 Endpoints are `ws://IP:PORT/PATH`; the listener's host must be an address. There is no TLS: a `wss://` endpoint is `Endpoint`, and
 plain WebSocket beyond loopback needs `dial.plain_beyond_loopback` or `listen.plain_beyond_loopback`, which `non_defaults` lists.
 A message is one WebSocket message, text by default (`frames`: a text message must be UTF-8). `listener.address()` is `ws://` and
-the bound address. A peer's address is the source address of its connection; a peer whose handshake fails is skipped.
+the bound address. A peer's address is the source address of its connection; a peer whose handshake fails is skipped. Each upgrade runs on a thread of its own, at most `max_handshakes` at once (a connection past it is closed unanswered), so a silent peer delays nobody and costs one place for at most `listen.limits.handshake`; closing the listener abandons the upgrades under way.
 `describe().max_message_bytes` is the smaller of the two `limits.max_message`.
 
 ## Contract (`coqui_transport_guatiao::contract`, feature `contract`)
