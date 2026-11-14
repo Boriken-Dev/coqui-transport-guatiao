@@ -15,7 +15,7 @@ exclude = [".*", "*.local.*", "__pycache__", "/examples/provider-python/"]
 publish = false
 
 [workspace]
-members = ["."]
+members = [".", "examples/provider-python"]
 
 [package.metadata.docs.rs]
 all-features = true
