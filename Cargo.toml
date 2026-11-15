@@ -40,9 +40,9 @@ guatiao-builder = { git = "https://github.com/Boriken-Dev/guatiao", rev = "e0136
 # Describes the settings types and lists their non-default values. By revision, as the family pins it.
 coqui-builder = { git = "https://github.com/Boriken-Dev/coqui-builder", rev = "c1875f8276bd6366c38e9133fdb1181a0ffbaaad", features = ["derive"] }
 # The channel contract a transport implements. No guatiao in it, and none is added: this crate is where the two meet.
-coqui-transport = { git = "https://github.com/Boriken-Dev/coqui-transport", rev = "1283116a22de6a8918faa3d0ebd78b8b6777ff0a", default-features = false }
-coqui-transport-pipe = { git = "https://github.com/Boriken-Dev/coqui-transport-pipe", rev = "1bf161f4d9349e9821d384859d3acdfb58aeae94", features = ["channel"], optional = true }
-coqui-transport-web = { git = "https://github.com/Boriken-Dev/coqui-transport-web", rev = "c8df84264ff8e60907f5cedf269104e91d5add22", optional = true }
+coqui-transport = { git = "https://github.com/Boriken-Dev/coqui-transport", rev = "2601da58de9cac8f635060e4746864e9b238c6c5", default-features = false }
+coqui-transport-pipe = { git = "https://github.com/Boriken-Dev/coqui-transport-pipe", rev = "76d97671d87372be5d29263a98198a08fea5eaed", features = ["channel"], optional = true }
+coqui-transport-web = { git = "https://github.com/Boriken-Dev/coqui-transport-web", rev = "df5be67b3a18e23b2d0073eb0f795a49a4221c93", optional = true }
 url = { version = "2.5", optional = true }
 
 [dev-dependencies]
