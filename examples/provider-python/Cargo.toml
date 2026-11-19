@@ -11,7 +11,7 @@ publish = false
 coqui-transport-guatiao = { path = "../..", features = ["contract"] }
 # A direct dependency so that build.rs learns where Cargo checked out guatiao, whose Python binding and source of
 # Python libraries the test needs.
-guatiao = { git = "https://github.com/Boriken-Dev/guatiao", rev = "e0136dcc9760ddd6dd8dc89fc4d41320eec6306e", features = ["provider", "load"] }
+guatiao = { git = "https://github.com/Boriken-Dev/guatiao", rev = "75f9ef4a302e28caa16b2231cc11b4c2b9a53c9d", features = ["provider", "load"] }
 
 [lints.rust]
 missing_docs = "warn"
